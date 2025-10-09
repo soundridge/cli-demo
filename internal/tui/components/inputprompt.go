@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/boke/cli-demo/internal/tui/keypress"
 	"github.com/boke/cli-demo/internal/tui/theme"
 	"github.com/boke/cli-demo/internal/tui/utils"
 )
@@ -57,6 +58,12 @@ type InputPromptConfig struct {
 
 	// ShowCursor controls cursor visibility
 	ShowCursor bool
+
+	// EnableKittyProtocol enables Kitty keyboard protocol support
+	EnableKittyProtocol bool
+
+	// DebugKeystroke enables debug logging for keystrokes
+	DebugKeystroke bool
 }
 
 // InputPrompt is a professional-grade input component matching the Gemini CLI specs.
@@ -86,6 +93,12 @@ type InputPrompt struct {
 
 	// Focus state
 	focused bool
+
+	// Enhanced keypress handler
+	keypressHandler *keypress.Handler
+
+	// Paste event handler
+	onPasteReceived func(string)
 }
 
 // NewInputPrompt creates a new InputPrompt component with the given configuration.
@@ -109,6 +122,29 @@ func NewInputPrompt(config InputPromptConfig) *InputPrompt {
 		focused:     true,
 	}
 
+	// Create enhanced keypress handler
+	ip.keypressHandler = keypress.NewHandler(keypress.HandlerConfig{
+		KittyEnabled:   config.EnableKittyProtocol,
+		DebugKeystroke: config.DebugKeystroke,
+		OnPaste: func(content string) {
+			// Handle paste events
+			if ip.onPasteReceived != nil {
+				ip.onPasteReceived(content)
+			} else {
+				// Default: insert pasted content at cursor position
+				ip.insertText(content)
+			}
+		},
+		OnKey: func(key keypress.Key) bool {
+			// This callback is used for secondary keys in batch sequences
+			// Process them through the normal key handling
+			if msg := key.Original; msg != nil {
+				ip.handleKeyMsg(*msg)
+			}
+			return true
+		},
+	})
+
 	ip.updateStyles()
 	return ip
 }
@@ -121,11 +157,14 @@ func (ip *InputPrompt) updateStyles() {
 	borderColor := ip.getBorderColor()
 
 	// Border style with rounded corners and padding
+	// Width should include: prefix + input content + padding (left + right)
+	prefixWidth := len([]rune(ip.getPromptPrefix()))
+	totalContentWidth := prefixWidth + ip.widths.InputWidth
 	ip.borderStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).
-		Padding(0, 1).                  // paddingX = 1 (left and right)
-		Width(ip.widths.InputWidth + 2) // +2 for the padding
+		Padding(0, 1).               // paddingX = 1 (left and right)
+		Width(totalContentWidth + 2) // +2 for left and right padding
 
 	// Prefix style (changes based on mode)
 	prefixColor := theme.Text.Accent
@@ -205,7 +244,13 @@ func (ip *InputPrompt) Update(msg tea.Msg) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		return ip.handleKeyMsg(msg)
+		// Process through enhanced keypress handler
+		key := ip.keypressHandler.ProcessTeaKey(msg)
+		if key == nil {
+			// Event consumed by handler (e.g., paste marker)
+			return nil
+		}
+		return ip.handleEnhancedKey(*key)
 
 	case tea.WindowSizeMsg:
 		// Recalculate widths on terminal resize
@@ -218,7 +263,95 @@ func (ip *InputPrompt) Update(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// handleKeyMsg processes keyboard input
+// handleEnhancedKey processes keyboard input with enhanced key information
+func (ip *InputPrompt) handleEnhancedKey(key keypress.Key) tea.Cmd {
+	// Handle special keys with modifiers
+	switch key.Name {
+	case "left":
+		if key.Ctrl {
+			// Ctrl+Left: Move to previous word
+			ip.moveToPreviousWord()
+		} else {
+			// Regular left arrow
+			if ip.cursorPos > 0 {
+				ip.cursorPos--
+			}
+		}
+
+	case "right":
+		if key.Ctrl {
+			// Ctrl+Right: Move to next word
+			ip.moveToNextWord()
+		} else {
+			// Regular right arrow
+			runes := []rune(ip.value)
+			if ip.cursorPos < len(runes) {
+				ip.cursorPos++
+			}
+		}
+
+	case "home":
+		ip.cursorPos = 0
+
+	case "end":
+		runes := []rune(ip.value)
+		ip.cursorPos = len(runes)
+
+	case "backspace":
+		if key.Ctrl {
+			// Ctrl+Backspace: Delete word backwards
+			ip.deleteWordBackward()
+		} else {
+			// Regular backspace
+			if ip.cursorPos > 0 {
+				runes := []rune(ip.value)
+				ip.value = string(runes[:ip.cursorPos-1]) + string(runes[ip.cursorPos:])
+				ip.cursorPos--
+			}
+		}
+
+	case "delete":
+		if key.Ctrl {
+			// Ctrl+Delete: Delete word forward
+			ip.deleteWordForward()
+		} else {
+			// Regular delete
+			runes := []rune(ip.value)
+			if ip.cursorPos < len(runes) {
+				ip.value = string(runes[:ip.cursorPos]) + string(runes[ip.cursorPos+1:])
+			}
+		}
+
+	case "return", "enter":
+		if key.Shift {
+			// Shift+Enter: Insert newline
+			ip.insertText("\n")
+		} else {
+			// Regular enter is handled by the parent component
+			// We just pass it through via the original KeyMsg
+			if key.Original != nil {
+				return ip.handleKeyMsg(*key.Original)
+			}
+		}
+
+	default:
+		// Regular character input
+		if key.Paste {
+			// This is pasted content
+			ip.insertText(key.Sequence)
+		} else if len(key.Name) == 1 && !key.Ctrl {
+			// Single character
+			ip.insertText(key.Name)
+		} else if key.Original != nil {
+			// Fall back to original handler for complex cases
+			return ip.handleKeyMsg(*key.Original)
+		}
+	}
+
+	return nil
+}
+
+// handleKeyMsg processes keyboard input (legacy, for compatibility)
 func (ip *InputPrompt) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
 	case tea.KeyLeft:
@@ -262,6 +395,121 @@ func (ip *InputPrompt) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+// insertText inserts text at the current cursor position
+func (ip *InputPrompt) insertText(text string) {
+	if text == "" {
+		return
+	}
+
+	// Limit total input length to prevent extremely long inputs
+	const maxInputLength = 10000 // Reasonable limit for CLI input
+	currentRunes := []rune(ip.value)
+	if len(currentRunes) >= maxInputLength {
+		return // Don't insert if already at max length
+	}
+
+	textRunes := []rune(text)
+	remainingSpace := maxInputLength - len(currentRunes)
+	if len(textRunes) > remainingSpace {
+		textRunes = textRunes[:remainingSpace]
+		text = string(textRunes)
+	}
+
+	before := string(currentRunes[:ip.cursorPos])
+	after := string(currentRunes[ip.cursorPos:])
+	ip.value = before + text + after
+	ip.cursorPos += len(textRunes)
+}
+
+// moveToPreviousWord moves cursor to the start of the previous word
+func (ip *InputPrompt) moveToPreviousWord() {
+	runes := []rune(ip.value)
+	if ip.cursorPos == 0 {
+		return
+	}
+
+	// Skip whitespace
+	pos := ip.cursorPos - 1
+	for pos > 0 && isWhitespace(runes[pos]) {
+		pos--
+	}
+
+	// Skip word characters
+	for pos > 0 && !isWhitespace(runes[pos]) {
+		pos--
+	}
+
+	if pos > 0 {
+		ip.cursorPos = pos + 1
+	} else {
+		ip.cursorPos = 0
+	}
+}
+
+// moveToNextWord moves cursor to the start of the next word
+func (ip *InputPrompt) moveToNextWord() {
+	runes := []rune(ip.value)
+	if ip.cursorPos >= len(runes) {
+		return
+	}
+
+	// Skip current word
+	pos := ip.cursorPos
+	for pos < len(runes) && !isWhitespace(runes[pos]) {
+		pos++
+	}
+
+	// Skip whitespace
+	for pos < len(runes) && isWhitespace(runes[pos]) {
+		pos++
+	}
+
+	ip.cursorPos = pos
+}
+
+// deleteWordBackward deletes from cursor to start of current/previous word
+func (ip *InputPrompt) deleteWordBackward() {
+	if ip.cursorPos == 0 {
+		return
+	}
+
+	runes := []rune(ip.value)
+	oldPos := ip.cursorPos
+
+	// Find start of word
+	ip.moveToPreviousWord()
+
+	// Delete from new position to old position
+	ip.value = string(runes[:ip.cursorPos]) + string(runes[oldPos:])
+}
+
+// deleteWordForward deletes from cursor to end of current/next word
+func (ip *InputPrompt) deleteWordForward() {
+	runes := []rune(ip.value)
+	if ip.cursorPos >= len(runes) {
+		return
+	}
+
+	// Skip whitespace
+	pos := ip.cursorPos
+	for pos < len(runes) && isWhitespace(runes[pos]) {
+		pos++
+	}
+
+	// Skip word characters
+	for pos < len(runes) && !isWhitespace(runes[pos]) {
+		pos++
+	}
+
+	// Delete from cursor to pos
+	ip.value = string(runes[:ip.cursorPos]) + string(runes[pos:])
+}
+
+// isWhitespace checks if a rune is whitespace
+func isWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // Render returns the rendered InputPrompt as a string.
@@ -350,6 +598,13 @@ func (ip *InputPrompt) renderLine(line string, lineIndex int, lineStartPos int) 
 			return ip.renderCursor(" ")
 		}
 		return ""
+	}
+
+	// Truncate line if it exceeds the input width
+	lineWidth := runewidth.StringWidth(line)
+	if lineWidth > ip.widths.InputWidth {
+		// Truncate to fit within input width
+		line = truncateToWidth(line, ip.widths.InputWidth)
 	}
 
 	tokens := utils.ParseInputForHighlighting(line, lineIndex)
@@ -580,4 +835,16 @@ func (ip *InputPrompt) SetMode(mode PromptMode) {
 // SetGhostText sets the autocomplete ghost text
 func (ip *InputPrompt) SetGhostText(text string) {
 	ip.config.GhostText = text
+}
+
+// SetPasteHandler sets a custom handler for paste events
+func (ip *InputPrompt) SetPasteHandler(handler func(string)) {
+	ip.onPasteReceived = handler
+}
+
+// Cleanup releases resources (timers, etc.) - call this when disposing the component
+func (ip *InputPrompt) Cleanup() {
+	if ip.keypressHandler != nil {
+		ip.keypressHandler.Cleanup()
+	}
 }
