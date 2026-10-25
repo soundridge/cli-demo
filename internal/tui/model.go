@@ -81,13 +81,22 @@ func New(width, height int) Model {
 		DebugMessage:   "",
 	})
 
-	// ⭐ 创建专业级 InputPrompt 组件
+	// ⭐ 创建专业级 InputPrompt 组件 with enhanced keyboard handling
 	inputPrompt := components.NewInputPrompt(components.InputPromptConfig{
-		Theme:         semanticTheme,
-		Placeholder:   "Type your message or @path/to/file",
-		TerminalWidth: width,
-		Mode:          components.PromptModeNormal,
-		ShowCursor:    true,
+		Theme:               semanticTheme,
+		Placeholder:         "Type your message or @path/to/file",
+		TerminalWidth:       width,
+		Mode:                components.PromptModeNormal,
+		ShowCursor:          true,
+		EnableKittyProtocol: true,  // Enable Kitty keyboard protocol for advanced key handling
+		DebugKeystroke:      false, // Set to true for debugging keyboard input
+	})
+
+	// Set up paste handler for drag-and-drop file paths
+	inputPrompt.SetPasteHandler(func(content string) {
+		// Handle pasted content (e.g., from drag-and-drop)
+		// This will automatically insert the content at the cursor position
+		// You can customize this behavior if needed
 	})
 
 	m := Model{
@@ -197,13 +206,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		m.inputPrompt.UpdateConfig(components.InputPromptConfig{
-			Theme:           m.semanticTheme,
-			Placeholder:     "Type your message or @path/to/file",
-			TerminalWidth:   msg.Width,
-			Mode:            m.mode,
-			ShellModeActive: m.mode == components.PromptModeShell,
-			YoloMode:        m.mode == components.PromptModeYolo,
-			ShowCursor:      true,
+			Theme:               m.semanticTheme,
+			Placeholder:         "Type your message or @path/to/file",
+			TerminalWidth:       msg.Width,
+			Mode:                m.mode,
+			ShellModeActive:     m.mode == components.PromptModeShell,
+			YoloMode:            m.mode == components.PromptModeYolo,
+			ShowCursor:          true,
+			EnableKittyProtocol: true,
+			DebugKeystroke:      false,
 		})
 
 		m.footer.Update(components.FooterConfig{
@@ -232,13 +243,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) updatePromptMode() {
 	m.inputPrompt.SetMode(m.mode)
 	m.inputPrompt.UpdateConfig(components.InputPromptConfig{
-		Theme:           m.semanticTheme,
-		Placeholder:     "Type your message or @path/to/file",
-		TerminalWidth:   m.terminalWidth,
-		Mode:            m.mode,
-		ShellModeActive: m.mode == components.PromptModeShell,
-		YoloMode:        m.mode == components.PromptModeYolo,
-		ShowCursor:      true,
+		Theme:               m.semanticTheme,
+		Placeholder:         "Type your message or @path/to/file",
+		TerminalWidth:       m.terminalWidth,
+		Mode:                m.mode,
+		ShellModeActive:     m.mode == components.PromptModeShell,
+		YoloMode:            m.mode == components.PromptModeYolo,
+		ShowCursor:          true,
+		EnableKittyProtocol: true,
+		DebugKeystroke:      false,
 	})
 }
 
